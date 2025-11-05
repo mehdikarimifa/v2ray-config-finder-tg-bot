@@ -18,13 +18,68 @@ const SPEED_TEST_FILE_SIZE_MB = process.env.SPEED_TEST_FILE_SIZE_MB ? parseInt(p
 
 const SERVICES_TO_TEST = [
     // --- AI Services ---
+    {
+        hashtag: '#Gemini',
+        /**
+         * Tests the actual Gemini API using the key.
+         * SUCCESS: 200 OK (key is good) or 400 Bad Request (key is bad, but API was reached).
+         * FAILURE: 403 Forbidden (region block, as in your example) or connection timeout.
+         */
+        test: async (agent, browserHeaders, helpers) => {
+            const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+            const postData = { "contents": [{"parts": [{"text": "Hello there.."}]}] };
+            const config = {
+                httpAgent: agent,
+                httpsAgent: agent,
+                headers: {
+                    'x-goog-api-key': "YOUR_GEMINI_API_KEY_HERE",
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'v2ray-config-tester'
+                },
+                timeout: 8000
+            };
+
+            try {
+                await axios.post(url, postData, config);
+            } catch (error) {
+                if (error.response) {
+                    if (error.response.status !== 403) return
+
+                    // 403 Forbidden is what a region-blocked IP gets. This is a FAILURE.
+                    // Any other code (500, etc.) is also a FAILURE.
+                    throw new Error(`API returned HTTP ${error.response.status}`);
+                }
+                // No response (e.g., connection timeout). This is a FAILURE.
+                throw error;
+            }
+        }
+    },
     { url: 'https://chatgpt.com/cdn-cgi/trace', hashtag: '#ChatGPT' },
-    { url: 'https://gemini.google.com/robots.txt', hashtag: '#Gemini' },
     
     // --- Streaming & Music ---
-    { url: 'https://www.netflix.com/robots.txt', hashtag: '#Netflix' },
+    { 
+        hashtag: '#Netflix',
+        test: async (agent, browserHeaders, helpers) => {
+            const config = { httpAgent: agent, httpsAgent: agent, headers: browserHeaders, timeout: 5000 };
+            await helpers.htmlContentCheck(
+                'https://www.netflix.com/title/80018499', // A known show URL
+                'page is not available', // The failure string to look for
+                config
+            );
+        }
+    },
     { url: 'http://googlevideo.com', hashtag: '#YouTube_Music' },
-    { url: 'https://accounts.spotify.com/', hashtag: '#Spotify' },
+    { 
+        hashtag: '#Spotify',
+        test: async (agent, browserHeaders, helpers) => {
+            const config = { httpAgent: agent, httpsAgent: agent, headers: browserHeaders, timeout: 5000 };
+            await helpers.apiPing(
+                'https://api.spotify.com/v1/artists/0TnOYISbd1XYRBk9myaseg',
+                [401, 403], // Expected auth-error codes
+                config
+            );
+        }
+    },
 
     // --- Social & Communication ---
     { url: 'https://www.tiktok.com/robots.txt', hashtag: '#TikTok' },
@@ -168,16 +223,20 @@ async function testConfig(originalLink, testPort) {
         const workingServices = [];
         for (const service of SERVICES_TO_TEST) {
             try {
-                await axios.get(service.url, {
-                    httpAgent: agent,
-                    httpsAgent: agent,
-                    headers: browserHeaders,
-                    timeout: 5000
-                });
+                // Pass the agent, headers, and our collection of helpers
+                // Each service.test() contains its own logic now
+                if (!service.test) return
+
+                await service.test(agent, browserHeaders, testHelpers);
+                
+                // If it doesn't throw an error, it's a success
                 workingServices.push(service.hashtag);
                 console.log(`[${service.hashtag}] success for ${details.ps}`);
+                
             } catch (serviceError) {
-                console.log(`[${service.hashtag}] failed for ${details.ps}`);
+                // This catches all failures (timeouts, 403s, content blocks, etc.)
+                const reason = serviceError.response ? `HTTP ${serviceError.response.status}` : serviceError.message;
+                console.log(`[${service.hashtag}] failed (${reason}) for ${details.ps}`);
             }
         }
 
@@ -282,5 +341,60 @@ async function runTestCycle() {
         console.error("[Tester] A critical error occurred during the test cycle:", error);
     }
 }
+
+const testHelpers = {
+    /**
+     * Performs a simple GET request. Fails on any non-200 status.
+     * @param {string} url - The URL to test.
+     * @param {object} config - The axios config (with agent, headers, etc.).
+     */
+    simpleGet: async (url, config) => {
+        await axios.get(url, config); // Throws on non-2xx
+    },
+
+    /**
+     * Performs a GET and checks for a failure string in the HTML.
+     * @param {string} url - The URL to test.
+     * @param {string} failureString - The lowercase string to check for in the HTML.
+     * @param {object} config - The axios config.
+     */
+    htmlContentCheck: async (url, failureString, config) => {
+        const response = await axios.get(url, config);
+        const responseBody = String(response.data).toLowerCase();
+        if (failureString && responseBody.includes(failureString.toLowerCase())) {
+            throw new Error('Content block detected');
+        }
+    },
+
+    /**
+     * Performs an API GET/POST where an auth error (e.g., 401, 403)
+     * is considered a SUCCESS (we reached the API).
+     * @param {string} url - The API endpoint.
+     * @param {number[]} expectedFailureCodes - e.g., [401, 403]
+     * @param {object} config - The axios config.
+     * @param {string} [method='get'] - 'get' or 'post'.
+     * @param {object} [postData=null] - Data for POST requests.
+     */
+    apiPing: async (url, expectedFailureCodes, config, method = 'get', postData = null) => {
+        try {
+            const args = (method === 'post') ? [url, postData, config] : [url, config];
+            await axios[method](...args);
+            
+            // If we got 200 OK, but expected an error
+            if (expectedFailureCodes.length > 0) {
+                throw new Error('API returned 200 OK, but expected an auth error.');
+            }
+            // else: 200 OK was expected, this is a pass.
+        } catch (error) {
+            // This is a SUCCESS if we got the *expected* auth error
+            if (error.response && expectedFailureCodes.includes(error.response.status)) {
+                return; // Success! We reached the API.
+            }
+            // This is a REAL failure (region block, timeout, 500, etc.)
+            throw error;
+        }
+    }
+};
+
 
 initialize();
