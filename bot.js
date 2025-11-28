@@ -42,6 +42,11 @@ function getFlagEmoji(countryCode, configName = "") {
   return "🏁";
 }
 
+const getChannelLink = () => {
+  const cleanChannelId = TARGET_CHANNEL_ID.replace("@", "");
+  return `https://t.me/${cleanChannelId}`;
+};
+
 // --- Main Bot Logic ---
 async function startBot() {
   try {
@@ -263,7 +268,8 @@ async function postNextConfigBatch() {
       })
       .join("\n\n");
 
-    const message = `${formattedConfigs}`;
+    const footerTag = `- ${getChannelLink()}`;
+    const message = `${formattedConfigs}\n\n${footerTag}`;
 
     await bot.sendMessage(TARGET_CHANNEL_ID, message, {
       parse_mode: "HTML",
