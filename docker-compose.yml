@@ -1,0 +1,29 @@
+services:
+  tester:
+    build: .
+    container_name: v2ray-tester
+    command: npm run start:tester
+    restart: unless-stopped
+    volumes:
+      - ./results:/app/results
+      - ./v2ray_bot.sqlite:/app/v2ray_bot.sqlite
+      - ./.env:/app/.env
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  bot:
+    build: .
+    container_name: v2ray-bot
+    command: npm run start:bot
+    restart: unless-stopped
+    depends_on:
+      - tester
+    volumes:
+      - ./results:/app/results
+      - ./v2ray_bot.sqlite:/app/v2ray_bot.sqlite
+      - ./.env:/app/.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
