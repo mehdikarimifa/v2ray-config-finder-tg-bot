@@ -12,7 +12,7 @@ COPY package*.json ./
 RUN npm install --production
 
 # --- DOWNLOAD XRAY CORE ---
-ENV XRAY_VERSION=1.8.4
+ENV XRAY_VERSION=25.12.8
 RUN curl -L -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" && \
     unzip xray.zip && \
     chmod +x xray && \

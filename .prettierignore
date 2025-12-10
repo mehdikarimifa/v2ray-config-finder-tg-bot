@@ -1,0 +1,8 @@
+node_modules
+results
+tmp
+dist
+.nitro
+.nuxt
+output
+coverage
