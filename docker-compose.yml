@@ -1,6 +1,9 @@
 services:
   tester:
-    build: .
+    build:
+      context: .
+      args:
+        - XRAY_DOWNLOAD_URL=${XRAY_DOWNLOAD_URL}
     container_name: v2ray-tester
     command: npm run start:tester
     restart: unless-stopped
@@ -19,7 +22,10 @@ services:
       - /app/tmp 
 
   bot:
-    build: .
+    build:
+      context: .
+      args:
+        - XRAY_DOWNLOAD_URL=${XRAY_DOWNLOAD_URL}
     container_name: v2ray-bot
     command: npm run start:bot
     restart: unless-stopped

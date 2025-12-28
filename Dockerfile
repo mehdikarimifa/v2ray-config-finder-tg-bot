@@ -1,25 +1,34 @@
-# Use a lightweight Node.js image
-FROM node:18-alpine
+# --- Stage 1: Builder ---
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
 
-# Install basic tools needed for downloading Xray
+# --- Stage 2: Production Runner ---
+FROM node:20-alpine
+
+# Install basic tools
 RUN apk add --no-cache curl unzip
 
-# Set working directory
 WORKDIR /app
 
-# Copy package files and install dependencies first (for caching)
-COPY package*.json ./
-RUN npm install --production
-
-# --- DOWNLOAD XRAY CORE ---
-ENV XRAY_VERSION=25.12.8
-RUN curl -L -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" && \
+# DOWNLOAD XRAY
+ARG XRAY_DOWNLOAD_URL="https://github.com/XTLS/Xray-core/releases/download/v25.12.8/Xray-linux-64.zip"
+RUN curl -L -o xray.zip "$XRAY_DOWNLOAD_URL" && \
     unzip xray.zip && \
     chmod +x xray && \
     rm xray.zip geoip.dat geosite.dat
 
-# Copy the rest of your application code
-COPY . .
+# Install Dependencies
+COPY package*.json ./
+RUN npm install --production
 
-# Create the results directory inside the container to avoid permission issues
-RUN mkdir -p results
+# Copy App Code
+COPY --from=builder /app/dist ./dist
+
+# Create directories
+RUN mkdir -p results tmp
+
+CMD ["node", "dist/index.js", "bot"]

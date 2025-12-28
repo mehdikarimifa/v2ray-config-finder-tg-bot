@@ -2,5 +2,5 @@ tmp
 results
 .env
 node_modules
-xray
+/xray
 *.sqlite
