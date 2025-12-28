@@ -8,7 +8,7 @@ import { SocksProxyAgent } from 'socks-proxy-agent'
 import { all, initDb } from './database.js'
 
 // --- Configuration ---
-const MAX_LATENCY_MS = process.env.MAX_LATENCY_MS ? parseInt(process.env.MAX_LATENCY_MS, 10) : 3000
+const MAX_LATENCY_MS = process.env.MAX_LATENCY_MS ? parseInt(process.env.MAX_LATENCY_MS, 10) : 1000
 const CONCURRENT_TESTS = process.env.CONCURRENT_TESTS
   ? parseInt(process.env.CONCURRENT_TESTS, 10)
   : 10
@@ -159,7 +159,11 @@ async function testConfig(originalLink, testPort) {
 
     const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${testPort}`)
 
-    const latency = await measureTTFB(agent, MAX_LATENCY_MS)
+    const latency = await measureStability(agent, MAX_LATENCY_MS)
+    if (latency === null) {
+      console.log(`❌ [FAILED] Stability Check Failed (Packet Loss) | ${details.ps}`)
+      return null
+    }
 
     let speedMbps = null
     if (ENABLE_SPEED_TEST) {
@@ -341,37 +345,43 @@ async function startXrayProcess(configPath) {
 }
 
 /**
- * Helper: Measures Time to First Byte (TTFB)
- * Uses stream to avoid downloading full body.
+ * STRICT Stability Tester
+ * - Runs 3 sequential pings.
+ * - If ANY ping fails or times out, it returns NULL (fail).
+ * - Returns the average latency only if connection is rock solid.
  */
-async function measureTTFB(agent, timeoutMs) {
-  const targetUrl = 'http://www.gstatic.com/generate_204' // Or "https://cp.cloudflare.com"
-  const maxAttempts = 2
-  let attempts = 0
+async function measureStability(agent, maxTimeout = 1500) {
+  const targetUrl = 'http://www.gstatic.com/generate_204'
+  const sampleCount = 3
+  const timings = []
 
-  while (attempts < maxAttempts) {
-    attempts++
+  for (let i = 0; i < sampleCount; i++) {
+    const start = Date.now()
     try {
-      const startTime = Date.now()
-
-      const response = await axios.get(targetUrl, {
+      // We force a new request each time
+      await axios.get(targetUrl, {
         httpAgent: agent,
         httpsAgent: agent,
-        timeout: timeoutMs,
-        responseType: 'stream',
-        validateStatus: () => true
+        timeout: maxTimeout,
+        validateStatus: status => status === 204 || status === 200 // Strict status check
       })
 
-      const ttfb = Date.now() - startTime
+      const duration = Date.now() - start
+      timings.push(duration)
 
-      if (response.data && typeof response.data.destroy === 'function') response.data.destroy()
+      // Small cooldown between pings to simulate real browsing gaps
+      if (i < sampleCount - 1) await new Promise(r => setTimeout(r, 200))
 
-      return ttfb
     } catch (e) {
-      if (attempts === maxAttempts) throw e
-      await new Promise(r => setTimeout(r, 1000))
+      // ❌ PACKET LOSS DETECTED
+      // If even one request fails, the line is not stable enough for high quality.
+      return null
     }
   }
+
+  // Calculate Average
+  const total = timings.reduce((acc, curr) => acc + curr, 0)
+  return Math.round(total / timings.length)
 }
 
 /**
