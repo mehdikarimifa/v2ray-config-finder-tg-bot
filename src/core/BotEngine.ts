@@ -6,12 +6,14 @@ import { env } from '@/config/env.js'
 import { logger } from '@/utils/logger.js'
 import { Database } from '@/infrastructure/database/Database.js'
 import { SourceRepository } from '@/infrastructure/database/repositories/SourceRepository.js'
+import { SettingsRepository } from '@/infrastructure/database/repositories/SettingsRepository.js'
 import { ITestResult } from '@/types/index.js'
 
 export class BotEngine {
   private bot: TelegramBot
   private db = Database.getInstance()
   private sourceRepo = new SourceRepository()
+  private settingsRepo = new SettingsRepository()
   private postingInterval: NodeJS.Timeout | null = null
 
   constructor() {
@@ -79,21 +81,41 @@ export class BotEngine {
       const text = files.map(f => `ID: ${f.id} | ${f.url}`).join('\n') || 'No files.'
       this.bot.sendMessage(msg.chat.id, text)
     })
+
+    this.bot.onText(/\/setschedule (.+)/, async (msg, match) => {
+      if (msg.from?.id !== env.ADMIN_USER_ID || !match) return
+
+      const seconds = parseInt(match[1], 10)
+      if (isNaN(seconds) || seconds < 60) {
+        this.bot.sendMessage(msg.chat.id, '⚠️ Minimum interval is 60 seconds.')
+        return
+      }
+
+      try {
+        await this.settingsRepo.setPostingInterval(seconds)
+        this.bot.sendMessage(msg.chat.id, `✅ Schedule updated: Every ${seconds} seconds.`)
+
+        // Restart the scheduler immediately to apply changes
+        await this.startScheduler()
+      } catch (e) {
+        this.bot.sendMessage(msg.chat.id, '❌ Error updating schedule.')
+      }
+    })
+
+    this.bot.onText(/\/getschedule/, async msg => {
+      if (msg.from?.id !== env.ADMIN_USER_ID) return
+
+      const seconds = await this.settingsRepo.getPostingInterval()
+      this.bot.sendMessage(msg.chat.id, `⏱ Current posting interval: ${seconds} seconds.`)
+    })
   }
 
   private async startScheduler() {
-    const row = await this.db.get<{ value: string }>(
-      "SELECT value FROM settings WHERE key = 'posting_interval_seconds'"
-    )
-    const seconds = row ? parseInt(row.value, 10) : 1800 // Default 30 mins
-
-    logger.info(`Posting schedule: Every ${seconds} seconds.`)
+    const seconds = await this.settingsRepo.getPostingInterval()
+    logger.info(`Scheduler active: Posting every ${seconds} seconds.`)
 
     if (this.postingInterval) clearInterval(this.postingInterval)
     this.postingInterval = setInterval(() => this.postBatch(), seconds * 1000)
-
-    // Run once immediately
-    this.postBatch()
   }
 
   private async postBatch() {
