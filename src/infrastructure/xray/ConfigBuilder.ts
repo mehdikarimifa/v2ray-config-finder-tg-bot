@@ -1,135 +1,169 @@
-import { IParsedConfig } from '@/types/index.js'
+import {
+  IParsedConfig,
+  IVmessDetails,
+  IVlessDetails,
+  ITrojanDetails,
+  IShadowsocksDetails,
+  IHysteria2Details
+} from '@/types/index.js'
 
 export class ConfigBuilder {
-  static build(config: IParsedConfig, localPort: number): any | null {
-    const { protocol, details } = config
-    let outboundConfig = null
+  /**
+   * Generates a single Xray config JSON for multiple proxies.
+   * Maps local ports to specific proxy outbounds.
+   */
+  static buildBatch(items: { config: IParsedConfig; port: number; id: number }[]): any {
+    const inbounds: any[] = []
+    const outbounds: any[] = []
+    const rules: any[] = []
 
+    // 1. Add the "Direct" outbound (required for Xray to work properly)
+    outbounds.push({ protocol: 'freedom', tag: 'direct' })
+
+    for (const item of items) {
+      const { config, port, id } = item
+      const proxyTag = `proxy_${id}`
+      const inboundTag = `in_${id}`
+
+      // A. Build the Proxy Outbound
+      const outbound = this.buildSingleOutbound(config)
+      if (!outbound) continue // Skip invalid configs
+
+      outbound.tag = proxyTag
+      outbounds.push(outbound)
+
+      // B. Build the SOCKS Inbound
+      inbounds.push({
+        tag: inboundTag,
+        port: port,
+        listen: '127.0.0.1',
+        protocol: 'socks',
+        settings: { udp: true }
+      })
+
+      // C. Add Routing Rule (Inbound -> Outbound)
+      rules.push({
+        type: 'field',
+        inboundTag: [inboundTag],
+        outboundTag: proxyTag
+      })
+    }
+
+    if (outbounds.length <= 1) return null // Only 'direct' exists
+
+    return {
+      log: { loglevel: 'none' },
+      inbounds,
+      outbounds,
+      routing: {
+        domainStrategy: 'AsIs',
+        rules
+      }
+    }
+  }
+
+  private static buildSingleOutbound(config: IParsedConfig): any | null {
+    const { protocol, details } = config
     try {
       switch (protocol) {
-        case 'vmess':
-          outboundConfig = {
+        case 'vmess': {
+          const d = details as IVmessDetails
+          return {
             protocol,
             settings: {
               vnext: [
                 {
-                  address: details.add,
-                  port: details.port,
-                  users: [
-                    {
-                      id: details.id,
-                      alterId: details.aid || 0,
-                      security: details.scy || 'auto'
-                    }
-                  ]
+                  address: d.add,
+                  port: d.port,
+                  users: [{ id: d.id, alterId: d.aid || 0, security: d.scy || 'auto' }]
                 }
               ]
             },
             streamSettings: {
-              network: details.net,
-              security: details.tls,
-              wsSettings: { path: details.path, headers: { Host: details.host } },
-              tlsSettings: { serverName: details.sni || details.host }
+              network: d.net,
+              security: d.tls,
+              wsSettings: { path: d.path, headers: { Host: d.host } },
+              tlsSettings: { serverName: d.sni || d.host }
             }
           }
-          break
-
-        case 'vless':
-          outboundConfig = {
+        }
+        case 'vless': {
+          const d = details as IVlessDetails
+          return {
             protocol,
             settings: {
               vnext: [
                 {
-                  address: details.add,
-                  port: details.port,
-                  users: [{ id: details.id, flow: details.flow, encryption: 'none' }]
+                  address: d.add,
+                  port: d.port,
+                  users: [{ id: d.id, flow: d.flow, encryption: 'none' }]
                 }
               ]
             },
             streamSettings: {
-              network: details.type, // 'type' maps to network in vless URLs usually
-              security: details.security,
+              network: d.type,
+              security: d.security,
               realitySettings:
-                details.security === 'reality'
+                d.security === 'reality'
                   ? {
-                      publicKey: details.pbk,
-                      shortId: details.sid,
-                      fingerprint: details.fp || 'chrome'
+                      publicKey: d.pbk,
+                      shortId: d.sid,
+                      fingerprint: d.fp || 'chrome'
                     }
                   : undefined,
-              wsSettings: { path: details.path, headers: { Host: details.host } },
-              tlsSettings: { serverName: details.sni }
+              wsSettings: { path: d.path, headers: { Host: d.host } },
+              tlsSettings: { serverName: d.sni }
             }
           }
-          break
-
-        case 'trojan':
-          outboundConfig = {
+        }
+        case 'trojan': {
+          const d = details as ITrojanDetails
+          return {
             protocol,
             settings: {
-              servers: [
-                {
-                  address: details.add,
-                  port: details.port,
-                  password: details.id
-                }
-              ]
+              servers: [{ address: d.add, port: d.port, password: d.id }]
             },
             streamSettings: {
-              security: details.security || 'tls',
-              tlsSettings: { serverName: details.sni },
-              wsSettings: { path: details.path, headers: { Host: details.host } }
+              security: d.security || 'tls',
+              tlsSettings: { serverName: d.sni },
+              wsSettings: { path: d.path, headers: { Host: d.host } }
             }
           }
-          break
-
-        case 'ss':
-          outboundConfig = {
+        }
+        case 'ss': {
+          const d = details as IShadowsocksDetails
+          return {
             protocol: 'shadowsocks',
             settings: {
               servers: [
                 {
-                  address: details.add,
-                  port: details.port,
-                  method: details.method,
-                  password: details.password
+                  address: d.add,
+                  port: d.port,
+                  method: d.method,
+                  password: d.password
                 }
               ]
             }
           }
-          break
-
-        case 'hysteria2':
-          outboundConfig = {
+        }
+        case 'hysteria2': {
+          const d = details as IHysteria2Details
+          return {
             protocol,
             settings: {
-              servers: [
-                {
-                  address: details.add,
-                  port: details.port,
-                  password: details.id
-                }
-              ]
+              servers: [{ address: d.add, port: d.port, password: d.id }]
             },
             streamSettings: {
               network: 'udp',
               security: 'tls',
               tlsSettings: {
-                serverName: details.sni,
-                insecure: details.insecure,
+                serverName: d.sni,
+                insecure: d.insecure,
                 alpn: ['h3']
               }
             }
           }
-          break
-      }
-
-      if (!outboundConfig) return null
-
-      return {
-        log: { loglevel: 'none' },
-        inbounds: [{ port: localPort, listen: '127.0.0.1', protocol: 'socks' }],
-        outbounds: [outboundConfig]
+        }
       }
     } catch (e) {
       return null

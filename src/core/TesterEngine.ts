@@ -11,7 +11,7 @@ import { ConfigBuilder } from '@/infrastructure/xray/ConfigBuilder.js'
 import { XrayInstance } from '@/infrastructure/xray/XrayInstance.js'
 import { NetworkTester } from '@/services/NetworkTester.js'
 import { IpService } from '@/services/IpService.js'
-import { ITestResult } from '@/types/index.js'
+import { ITestResult, IParsedConfig } from '@/types/index.js'
 
 export class TesterEngine {
   private sourceRepo = new SourceRepository()
@@ -24,11 +24,10 @@ export class TesterEngine {
     }
 
     logger.info('Starting in scheduled mode.')
-    // Initial run
-    await this.runCycle()
+    await this.runCycle() // Initial run
 
-    // Schedule loop
-    setInterval(() => this.runCycle(), env.TEST_INTERVAL_MINUTES * 60 * 1000)
+    const intervalMs = env.TEST_INTERVAL_MINUTES * 60 * 1000
+    setInterval(() => this.runCycle(), intervalMs)
   }
 
   private async runCycle() {
@@ -40,10 +39,9 @@ export class TesterEngine {
         return
       }
 
-      // Shuffle sources
       const shuffled = sources.sort(() => 0.5 - Math.random())
 
-      const fetchOptions: any = { timeout: 5000 }
+      const fetchOptions: any = { timeout: 50000 }
       if (env.PROXY_URL) {
         const agent = new SocksProxyAgent(env.PROXY_URL)
         fetchOptions.httpAgent = agent
@@ -55,14 +53,13 @@ export class TesterEngine {
         try {
           const response = await axios.get(source.url, fetchOptions)
           const configs = ParserService.parseConfigsFromText(response.data)
-
           if (configs.length > 0) {
             const sourceName =
               new URL(source.url).pathname.split('/').pop()?.replace('.txt', '') || 'unknown'
-            await this.processBatch(configs, sourceName)
+            await this.processConfigs(configs, sourceName)
           }
         } catch (e: any) {
-          logger.error(`Failed to process source ${source.url}`, e)
+          logger.error(`Failed to process source ${source.url}`, e.message)
         }
       }
     } catch (e) {
@@ -75,74 +72,96 @@ export class TesterEngine {
       const content = await fs.readFile(filePath, 'utf-8')
       const configs = ParserService.parseConfigsFromText(content)
       const sourceName = path.basename(filePath, path.extname(filePath))
-      await this.processBatch(configs, sourceName)
+      await this.processConfigs(configs, sourceName)
     } catch (e) {
       logger.error('Error reading single file', e)
     }
   }
 
-  private async processBatch(configs: string[], sourceName: string) {
-    logger.info(`Testing ${configs.length} configs from ${sourceName}...`)
+  /**
+   * Main Batch Processing Logic
+   */
+  private async processConfigs(rawConfigs: string[], sourceName: string) {
     const results: ITestResult[] = []
     const BATCH_SIZE = env.CONCURRENT_TESTS
+    const START_PORT = 20000 // Base port to prevent conflicts
 
-    for (let i = 0; i < configs.length; i += BATCH_SIZE) {
-      const batch = configs.slice(i, i + BATCH_SIZE)
-      const promises = batch.map((cfg, idx) => this.testConfig(cfg, 20800 + idx))
-      const batchResults = await Promise.all(promises)
-      results.push(...(batchResults.filter(Boolean) as ITestResult[]))
+    // Parse all first
+    const parsedConfigs: IParsedConfig[] = rawConfigs
+      .map(link => ParserService.parseLink(link))
+      .filter((c): c is IParsedConfig => c !== null)
+
+    logger.info(`Testing ${parsedConfigs.length} valid configs from ${sourceName}...`)
+
+    // Loop in chunks
+    for (let i = 0; i < parsedConfigs.length; i += BATCH_SIZE) {
+      const chunk = parsedConfigs.slice(i, i + BATCH_SIZE)
+
+      // Prepare batch items
+      const batchItems = chunk.map((config, idx) => ({
+        config,
+        port: START_PORT + idx,
+        id: idx
+      }))
+
+      // Build Multi-Inbound Config
+      const xrayConfig = ConfigBuilder.buildBatch(batchItems)
+      if (!xrayConfig) continue
+
+      // Write Temp File
+      const tempId = crypto.randomBytes(4).toString('hex')
+      const tempPath = path.join(process.cwd(), 'tmp', `batch_${tempId}.json`)
+      await fs.mkdir(path.dirname(tempPath), { recursive: true })
+      await fs.writeFile(tempPath, JSON.stringify(xrayConfig))
+
+      const xray = new XrayInstance(tempPath)
+
+      try {
+        await xray.start()
+
+        // Run tests in parallel
+        const promises = batchItems.map(item => this.testSingleInBatch(item))
+        const batchResults = await Promise.all(promises)
+
+        results.push(...(batchResults.filter(Boolean) as ITestResult[]))
+      } catch (e) {
+        logger.error('Batch execution failed', e)
+      } finally {
+        await xray.stop()
+      }
     }
 
     if (results.length > 0) {
       await this.saveResults(results, sourceName)
-    } else {
-      logger.info(`No working configs found for ${sourceName}`)
     }
   }
 
-  private async testConfig(originalLink: string, port: number): Promise<ITestResult | null> {
-    const parsed = ParserService.parseLink(originalLink)
-    if (!parsed) return null
-
-    const xrayConfig = ConfigBuilder.build(parsed, port)
-    if (!xrayConfig) return null
-
-    // Unique temp file
-    const tempPath = path.join(
-      process.cwd(),
-      'tmp',
-      `test_${port}_${crypto.randomBytes(4).toString('hex')}.json`
-    )
-
-    // Ensure tmp dir exists
-    await fs.mkdir(path.dirname(tempPath), { recursive: true })
-    await fs.writeFile(tempPath, JSON.stringify(xrayConfig))
-
-    const xray = new XrayInstance(tempPath)
+  private async testSingleInBatch(item: {
+    config: IParsedConfig
+    port: number
+  }): Promise<ITestResult | null> {
+    const { config, port } = item
+    const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${port}`)
 
     try {
-      await xray.start()
-      const agent = new SocksProxyAgent(`socks5h://127.0.0.1:${port}`)
-
-      // 1. Stability Check (The strict logic we added)
+      // 1. Stability
       const latency = await NetworkTester.measureStability(agent)
       if (latency === null) return null
 
-      // 2. Speed Test
+      // 2. Speed (Optional)
       let speedMbps = null
       if (env.ENABLE_SPEED_TEST) {
         speedMbps = await NetworkTester.measureSpeed(agent)
       }
 
-      // 2. Active Geo-Location (The New Feature)
-      // We ask the proxy: "Where are we?"
+      // 3. Geo
       const geo = await IpService.getGeoInfo(agent)
 
-      logger.success(`(Lat: ${latency}ms) ${parsed.details.ps}`)
+      logger.success(`(Lat: ${latency}ms) ${config.details.ps}`)
 
       return {
-        config: originalLink,
-        name: parsed.details.ps || 'Unknown',
+        config: config.originalLink,
+        name: config.details.ps || 'Unknown',
         latency,
         speedMbps,
         countryCode: geo.countryCode,
@@ -152,18 +171,14 @@ export class TesterEngine {
       }
     } catch (e) {
       return null
-    } finally {
-      await xray.stop()
     }
   }
 
   private async saveResults(results: ITestResult[], sourceName: string) {
     const timestamp = new Date().toISOString().replace(/:/g, '-').split('.')[0]
     const filename = path.join(process.cwd(), 'results', `${sourceName}_${timestamp}.json`)
-
     await fs.mkdir(path.dirname(filename), { recursive: true })
 
-    // Sort: Tags -> Speed -> Latency
     results.sort(
       (a, b) =>
         (b.speedMbps ? parseFloat(b.speedMbps) : 0) - (a.speedMbps ? parseFloat(a.speedMbps) : 0) ||
@@ -171,6 +186,6 @@ export class TesterEngine {
     )
 
     await fs.writeFile(filename, JSON.stringify(results, null, 2))
-    logger.success(`Saved ${results.length} configs to ${filename}`)
+    logger.success(`Saved ${results.length} working configs to ${filename}`)
   }
 }

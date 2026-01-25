@@ -7,7 +7,7 @@ export class NetworkTester {
    * Runs 3 sequential pings. Returns Average Latency or NULL if any fail.
    */
   static async measureStability(agent: SocksProxyAgent): Promise<number | null> {
-    const targetUrl = 'http://www.gstatic.com/generate_204'
+    const targetUrl = 'https://www.gstatic.com/generate_204'
     const sampleCount = 3
     const timings: number[] = []
 

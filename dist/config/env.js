@@ -19,5 +19,5 @@ export const env = {
     SPEED_TEST_URL: process.env.SPEED_TEST_URL || 'http://cachefly.cachefly.net/5mb.test',
     SPEED_TEST_FILE_SIZE_MB: parseInt(process.env.SPEED_TEST_FILE_SIZE_MB || '5', 10),
     DB_PATH: process.env.DB_PATH || './v2ray_bot.sqlite',
-    PROXY_URL: process.env.PROXY_URL || undefined,
+    PROXY_URL: process.env.PROXY_URL || undefined
 };
